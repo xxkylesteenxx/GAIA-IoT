@@ -1,0 +1,42 @@
+# GAIA-IoT K3s single-node edge deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gaia-iot
+  namespace: gaia-edge
+  labels:
+    app: gaia-iot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gaia-iot
+  template:
+    metadata:
+      labels:
+        app: gaia-iot
+    spec:
+      containers:
+        - name: gaia-iot
+          image: ghcr.io/xxkylesteenxx/gaia-iot:v0.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GAIA_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: GAIA_STATE_ROOT
+              value: "/gaia-state"
+          volumeMounts:
+            - name: gaia-state
+              mountPath: /gaia-state
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+      volumes:
+        - name: gaia-state
+          emptyDir: {}
