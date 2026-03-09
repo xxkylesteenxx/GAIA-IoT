@@ -1,0 +1,23 @@
+[Unit]
+Description=GAIA IoT Edge Node
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gaia
+WorkingDirectory=/opt/gaia-iot
+ExecStart=/opt/gaia-iot/venv/bin/python -m gaia_iot.entrypoint
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gaia-iot
+
+# cgroup v2 resource limits (enable in production)
+# CPUQuota=200%
+# MemoryMax=512M
+# IOWeight=100
+
+[Install]
+WantedBy=multi-user.target
