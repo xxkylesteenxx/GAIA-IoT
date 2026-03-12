@@ -11,6 +11,7 @@ from gaia_iot.sensors.manager import SensorManager
 from gaia_iot.fusion.engine import FusionEngine
 from gaia_iot.uplink.uplink import EdgeUplink
 from gaia_iot.power.manager import PowerManager
+from gaia_iot.planetary.publisher import PlanetaryStatePublisher
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,8 @@ class GaiaIoTNode:
       4. Start sensor manager
       5. Start fusion engine
       6. Start edge uplink
-      7. Run sensor-fuse-uplink loop
+      7. Start planetary-state publisher
+      8. Run sensor-fuse-uplink-publish loop
     """
 
     def __init__(self, config: IoTConfig = DEFAULT_IOT_CONFIG) -> None:
@@ -36,7 +38,9 @@ class GaiaIoTNode:
         self.fusion = None
         self.uplink = None
         self.power = None
+        self.planetary = None
         self._running = False
+        self._last_snapshot_time: float = 0.0
 
     def boot(self) -> None:
         logging.basicConfig(
@@ -69,12 +73,16 @@ class GaiaIoTNode:
         self.uplink.start()
         logger.info("EdgeUplink started. endpoint=%s", self.config.uplink_endpoint)
 
+        # 6. Planetary publisher
+        self.planetary = PlanetaryStatePublisher(self.config)
+        logger.info("PlanetaryStatePublisher ready.")
+
         self._running = True
         logger.info("GAIA-IoT ready. identity=%s",
                     self.substrate.identity.public_fingerprint)
 
     def run(self) -> None:
-        """Main sensor-fuse-uplink loop."""
+        """Main sensor-fuse-uplink-publish loop."""
         while self._running:
             try:
                 # Collect raw observations from all sensors
@@ -88,18 +96,28 @@ class GaiaIoTNode:
                     self.substrate.dispatch("ATLAS", {
                         "kind": "ingest_observation",
                         "payload": {
-                            "source_id":           obs.source_id,
-                            "domain":              obs.domain,
-                            "payload":             obs.payload,
-                            "quality_score":       obs.quality_score,
-                            "freshness_class":     obs.freshness_class,
+                            "source_id":             obs.source_id,
+                            "domain":                obs.domain,
+                            "payload":               obs.payload,
+                            "quality_score":         obs.quality_score,
+                            "freshness_class":       obs.freshness_class,
                             "adversarial_suspicion": obs.adversarial_suspicion,
-                            "source_class":        obs.source_class.value,
+                            "source_class":          obs.source_class.value,
                         },
                     })
 
                 # Queue fused observations for uplink
                 self.uplink.enqueue(fused)
+
+                # Publish planetary-state snapshot at configured cadence
+                now = time.time()
+                interval = self.config.planetary_snapshot_interval_s
+                if self.config.planetary_publish_enabled and (
+                    now - self._last_snapshot_time >= interval
+                ):
+                    snapshot = self.planetary.build_snapshot(fused)
+                    self.uplink.enqueue_snapshot(snapshot)
+                    self._last_snapshot_time = now
 
             except Exception as exc:
                 logger.error("IoT loop error: %s", exc)

@@ -37,6 +37,10 @@ class IoTConfig:
     uplink_retry_max: int = 5
     uplink_retry_backoff_seconds: float = 2.0
 
+    # planetary-state publishing
+    planetary_publish_enabled: bool = True
+    planetary_snapshot_interval_s: float = 60.0  # publish cadence in seconds
+
     # power management
     power_mode: str = "balanced"  # full | balanced | low-power | sleep
     battery_threshold_low: float = 0.20

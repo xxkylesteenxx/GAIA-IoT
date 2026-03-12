@@ -9,6 +9,7 @@ from dataclasses import asdict
 from typing import Any, Dict, List
 
 from gaia_core.models import EnvironmentalObservation
+from gaia_iot.planetary.publisher import PlanetaryStateSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +23,11 @@ class EdgeUplink:
       - configurable batch size
       - exponential retry with max_retry limit
       - backpressure: stop enqueueing if buffer exceeds max_events
+      - planetary-state snapshot queue (separate from observation buffer)
       - stub transport (replace with real gRPC AtlasObservationService.Ingest)
 
     Production transport:
-      gRPC AtlasObservationService.Ingest over mTLS/PQC (X25519MLKEM768)
+      gRPC AtlasObservationService.Ingest + planetary_state_push() over mTLS/PQC
       Causal envelope required for Class A observations.
     """
 
@@ -35,10 +37,12 @@ class EdgeUplink:
         self._buffer: deque[Dict[str, Any]] = deque(
             maxlen=config.buffer_max_events
         )
+        self._snapshot_queue: deque[PlanetaryStateSnapshot] = deque(maxlen=64)
         self._running = False
         self._thread: threading.Thread | None = None
         self._sent = 0
         self._failed = 0
+        self._snapshots_sent = 0
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -50,7 +54,8 @@ class EdgeUplink:
 
     def stop(self) -> None:
         self._running = False
-        logger.info("EdgeUplink stopped. sent=%d failed=%d", self._sent, self._failed)
+        logger.info("EdgeUplink stopped. sent=%d failed=%d snapshots_sent=%d",
+                    self._sent, self._failed, self._snapshots_sent)
 
     def enqueue(self, observations: List[EnvironmentalObservation]) -> None:
         """Add observations to the uplink buffer."""
@@ -69,6 +74,16 @@ class EdgeUplink:
                     "adversarial_suspicion": obs.adversarial_suspicion,
                 })
 
+    def enqueue_snapshot(self, snapshot: PlanetaryStateSnapshot) -> None:
+        """Queue a planetary-state snapshot for uplink to GAIA-Server."""
+        with self._lock:
+            self._snapshot_queue.append(snapshot)
+        logger.debug("EdgeUplink: snapshot queued. id=%s", snapshot.snapshot_id)
+
+    def snapshot_queue_depth(self) -> int:
+        with self._lock:
+            return len(self._snapshot_queue)
+
     def buffer_depth(self) -> int:
         with self._lock:
             return len(self._buffer)
@@ -77,6 +92,24 @@ class EdgeUplink:
         while self._running:
             time.sleep(self.config.buffer_flush_interval_seconds)
             self._flush_batch()
+            self._flush_snapshots()
+
+    def _flush_snapshots(self) -> None:
+        with self._lock:
+            if not self._snapshot_queue:
+                return
+            snapshot = self._snapshot_queue.popleft()
+
+        try:
+            self._transmit_snapshot(snapshot)
+            with self._lock:
+                self._snapshots_sent += 1
+            logger.info("EdgeUplink.flush_snapshot: id=%s obs=%d",
+                        snapshot.snapshot_id, snapshot.observation_count)
+        except Exception as exc:
+            logger.warning("EdgeUplink.flush_snapshot failed: %s", exc)
+            with self._lock:
+                self._snapshot_queue.appendleft(snapshot)  # re-queue
 
     def _flush_batch(self) -> None:
         with self._lock:
@@ -107,7 +140,6 @@ class EdgeUplink:
                         self.config.uplink_retry_backoff_seconds * (2 ** (attempt - 1))
                     )
 
-        # All retries exhausted - re-queue batch (prepend to front)
         logger.error(
             "EdgeUplink: all retries exhausted. Re-queuing %d observations.",
             len(batch),
@@ -126,9 +158,21 @@ class EdgeUplink:
         """
         if not self.config.uplink_enabled:
             return
-        # Stub: dispatch locally into substrate ATLAS for testing
         for item in batch:
             self.substrate.dispatch("ATLAS", {
                 "kind":    "uplink_batch_item",
                 "payload": item,
             })
+
+    def _transmit_snapshot(self, snapshot: PlanetaryStateSnapshot) -> None:
+        """
+        Stub planetary-state transmit. Replace with:
+          stub.planetary_state_push(PlanetaryStatePushRequest(snapshot=snapshot))
+        """
+        if not getattr(self.config, "planetary_publish_enabled", True):
+            return
+        self.substrate.dispatch("NEXUS", {
+            "kind":     "planetary_state_snapshot",
+            "node_id":  snapshot.node_id,
+            "snapshot": asdict(snapshot),
+        })
